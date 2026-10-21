@@ -2575,7 +2575,7 @@ addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); windo
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import { getDatabase, ref, onValue, get, set, push, update, remove, query, orderByChild, equalTo } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+import { getDatabase, ref, onValue, get, set, push, update, remove, query, orderByChild, equalTo, runTransaction } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 
 
@@ -3343,11 +3343,23 @@ async function setQty(id, n) {
   try { await set(ref(db, 'products/' + id + '/quantity'), n); }
   catch (e) { console.error(e); showToast('❌ تعذر تحديث المخزون', 'error'); renderProducts(); }
 }
+// تعديل نسبي ذري: لا يمسح خصم مخزون حدث بالتزامن (من الإدارة أو عند قبول طلب)
+async function adjustQty(id, delta) {
+  let result = null;
+  try {
+    const tx = await runTransaction(ref(db, 'products/' + id + '/quantity'), cur => {
+      const n = Math.floor(Number(cur) || 0) + delta;
+      return Math.min(1000000, Math.max(0, n));
+    });
+    result = tx.committed ? Number(tx.snapshot.val()) || 0 : null;
+  } catch (e) { console.error(e); showToast('❌ تعذر تحديث المخزون', 'error'); renderProducts(); }
+  return result;
+}
 $('productsGrid').addEventListener('click', async e => {
   const box = e.target.closest('[data-qs-box]'); if (!box) return;
   const id = box.dataset.qsBox, inp = box.querySelector('[data-qs-input]'), cur = Number(inp.value) || 0;
   const step = e.target.closest('[data-qs]');
-  if (step) { const n = Math.max(0, cur + Number(step.dataset.qs)); inp.value = n; await setQty(id, n); }
+  if (step) { inp.value = Math.max(0, cur + Number(step.dataset.qs)); const n = await adjustQty(id, Number(step.dataset.qs)); if (n !== null) inp.value = n; }
   else if (e.target.closest('[data-qs-out]')) {
     if (!await window.proConfirm('تحويل هذا المنتج إلى «نفد»؟ (الكمية = 0 ويختفي من الطلب للعملاء)', { type: 'warning', title: 'نفاد المنتج', okText: 'نعم، نفد' })) return;
     inp.value = 0; await setQty(id, 0); showToast('🚫 تم تحويل المنتج إلى نفد');
@@ -3394,8 +3406,8 @@ function renderOrders() {
   try { renderTodayStrip(); } catch (_) {}
   const fin = parts.filter(isFinished);
   const bulk = $('ordersBulk');
-  if (bulk) bulk.innerHTML = fin.length ? `<button class="btn btn-danger btn-sm" id="delAllBtn"><i class="fa-solid fa-trash-can"></i> حذف كل الطلبات المكتملة (${fin.length})</button> <small style="color:var(--text-muted);margin-inline-start:8px">المسلَّمة تبقى في حساباتك</small>` : '';
-  if (bulk) bulk.innerHTML += `<div style="font-size:11px;color:var(--text-muted);margin-top:6px">ℹ️ الطلبات المكتملة تختفي من هذه الصفحة بعد 5 دقائق، وتُحذف نهائياً من قاعدة البيانات بعد 24 ساعة.</div>`;
+  if (bulk) bulk.innerHTML = (fin.length ? `<button class="btn btn-danger btn-sm" id="delAllBtn"><i class="fa-solid fa-trash-can"></i> حذف كل الطلبات المكتملة (${fin.length})</button> <small style="color:var(--text-muted);margin-inline-start:8px">المسلَّمة تبقى في حساباتك</small> ` : '') + (parts.length ? `<button class="btn btn-danger btn-sm" id="delEveryBtn" style="margin-top:6px"><i class="fa-solid fa-trash-can-arrow-up"></i> حذف كل الطلبات حتى غير المكتملة (${parts.length})</button>` : '');
+  if (bulk) bulk.innerHTML += `<div style="font-size:11px;color:var(--text-muted);margin-top:6px">ℹ️ الطلبات المكتملة تختفي من هذه الصفحة بعد 5 دقائق، وتُحذف نهائياً من قاعدة البيانات بعد 24 ساعة. يمكنك حذف أي طلب يدوياً في أي وقت.</div>`;
   const flt = O_FILTERS.find(x => x[0] === oFilter)[2];
   let list = parts.filter(p => !isHiddenDone(p) && flt(pDisp(p)));
   if (oQuery) list = list.filter(p => (String(p.shortId || '') + ' ' + p.id + ' ' + partItems(p).map(i => i.name || '').join(' ')).toLowerCase().includes(oQuery));
@@ -3409,7 +3421,7 @@ function renderOrders() {
       : p.status === 'preparing' && !['rejected', 'returned'].includes(d)
       ? `<button class="btn btn-success btn-sm" data-ps="ready" data-id="${p.id}"><i class="fa-solid fa-box"></i> جاهز للشحن</button>
          <button class="btn btn-danger btn-sm" data-ps="unavailable" data-id="${p.id}">غير متوفر</button>` : '';
-    const delBtn = isFinished(p) ? `<div class="status-flow" style="margin-top:10px"><button class="btn btn-outline btn-sm" data-del="${p.id}" style="color:#fca5a5;border-color:rgba(252,165,165,.4)"><i class="fa-solid fa-trash"></i> حذف الطلب</button></div>` : '';
+    const delBtn = `<div class="status-flow" style="margin-top:10px"><button class="btn btn-outline btn-sm" data-del="${p.id}" style="color:#fca5a5;border-color:rgba(252,165,165,.4)"><i class="fa-solid fa-trash"></i> حذف الطلب${isFinished(p) ? '' : ' (غير مكتمل)'}</button></div>`;
     const idx = FLOW.indexOf(d);
     const tl = idx >= 0
       ? `<div class="vx-timeline">${FLOW_L.map((l, i) => `<div class="vx-step ${i < idx || d === 'delivered' ? 'done' : (i === idx ? 'cur' : '')}">${i < idx || d === 'delivered' ? '✓ ' : ''}${l}</div>`).join('')}</div>`
@@ -3467,10 +3479,22 @@ $('ordersBulk').addEventListener('click', async e => {
   catch (er) { console.error(er); showToast('❌ تعذر الحذف (لم يُحذف شيء) — راجع صلاحيات Firebase', 'error'); }
   finally { hidePageLoading(); }
 });
+$('ordersBulk').addEventListener('click', async e => {
+  if (!e.target.closest('#delEveryBtn')) return;
+  const list = parts.slice(); if (!list.length) return;
+  const open = list.filter(p => !isFinished(p)).length;
+  if (!await window.proConfirm(`حذف جميع الطلبات (${list.length}) نهائياً من قاعدة البيانات؟${open ? `\n\n⚠️ منها ${open} طلب غير مكتمل سيُحذف أيضاً من حسابك، وستبقى طلبات العملاء عند الإدارة محجوزة بانتظار جاهزيتك حتى ترفضها الإدارة.` : ''}\nالطلبات المسلَّمة تبقى محسوبة في حساباتك.`, { type: 'danger', title: 'حذف كل الطلبات', okText: 'نعم، احذف الكل' })) return;
+  if (open && !await window.proConfirm('تأكيد أخير: لا يمكن التراجع عن حذف الطلبات غير المكتملة.', { type: 'danger', title: 'هل أنت متأكد؟', okText: 'احذف نهائياً' })) return;
+  showPageLoading('جاري الحذف...', 'يرجى الانتظار');
+  try { await deleteParts(list); showToast(`🗑️ تم حذف ${list.length} طلب`); }
+  catch (er) { console.error(er); showToast('❌ تعذر الحذف (لم يُحذف شيء) — راجع صلاحيات Firebase', 'error'); }
+  finally { hidePageLoading(); }
+});
 $('ordersList').addEventListener('click', async e => {
   const db_ = e.target.closest('[data-del]'); if (!db_) return;
-  const p = parts.find(x => x.id === db_.dataset.del); if (!p || !isFinished(p)) return;
-  if (!await window.proConfirm(`حذف الطلب #${p.shortId || p.id.slice(-8)} نهائياً من قاعدة البيانات؟${p.status === 'delivered' ? '\nسيبقى محسوباً في حساباتك.' : ''}`, { type: 'danger', title: 'حذف الطلب', okText: 'احذف' })) return;
+  const p = parts.find(x => x.id === db_.dataset.del); if (!p) return;
+  const unfinished = !isFinished(p);
+  if (!await window.proConfirm(`حذف الطلب #${p.shortId || p.id.slice(-8)} نهائياً من قاعدة البيانات؟${p.status === 'delivered' ? '\nسيبقى محسوباً في حساباتك.' : ''}${unfinished ? '\n\n⚠️ هذا الطلب غير مكتمل بعد. سيُحذف من حسابك، لكن طلب العميل يبقى عند الإدارة بحالة «بانتظار جاهزية التاجر» ولن تستطيع قبوله إلا برفضه. أبلغ الإدارة قبل الحذف.' : ''}`, { type: 'danger', title: unfinished ? 'حذف طلب غير مكتمل' : 'حذف الطلب', okText: 'احذف' })) return;
   db_.disabled = true;
   try { await deleteParts([p]); showToast('🗑️ تم حذف الطلب'); }
   catch (er) { console.error(er); db_.disabled = false; showToast('❌ تعذر الحذف — راجع صلاحيات Firebase', 'error'); }
@@ -3704,6 +3728,75 @@ initInvite();
   };
   document.getElementById('pwaClose').onclick = function () { localStorage.setItem(K, String(Date.now())); bar.classList.remove('show'); };
   addEventListener('appinstalled', function () { bar.classList.remove('show'); });
+})();
+</script>
+
+<!-- مؤشر حالة الاتصال (مرحلة PWA): لا يغيّر أي وظيفة قائمة -->
+<style>
+#proNetBar{position:fixed;left:0;right:0;top:0;z-index:2147483000;padding:calc(8px + env(safe-area-inset-top,0px)) 14px 8px;text-align:center;font:600 13px/1.4 system-ui,'Segoe UI',Tahoma,sans-serif;color:#fff;transform:translateY(-110%);transition:transform .25s ease;pointer-events:none}
+#proNetBar.show{transform:translateY(0)}
+#proNetBar.off{background:#b45309}#proNetBar.on{background:#15803d}
+@media (prefers-reduced-motion:reduce){#proNetBar{transition:none}}
+</style>
+<div id="proNetBar" role="status" aria-live="polite"></div>
+<script>
+(function(){
+  var bar=document.getElementById('proNetBar'),t=null,wasOff=false;
+  function show(msg,cls,auto){bar.textContent=msg;bar.className='show '+cls;clearTimeout(t);if(auto)t=setTimeout(function(){bar.className=''},auto);}
+  function offline(){wasOff=true;show('⚠️ لا يوجد اتصال — البيانات المعروضة قد لا تكون محدّثة والتعديلات لن تُحفظ حتى يعود الاتصال','off',0);}
+  function online(){if(!wasOff)return;wasOff=false;show('✅ عاد الاتصال — جارٍ مزامنة البيانات','on',3500);}
+  window.addEventListener('offline',offline);window.addEventListener('online',online);
+  if(!navigator.onLine)offline();
+})();
+</script>
+
+<!-- شريط تنقل سفلي للهاتف (مرحلة تجربة الهاتف): يعتمد على window.switchTab الحالية دون تغييرها -->
+<style>
+#proBottomNav{display:none}
+@media (max-width:768px){
+  #proBottomNav{position:fixed;left:0;right:0;bottom:0;z-index:900;display:flex;background:var(--bg-card,#1e1e2a);border-top:1px solid var(--border-color,#2d2d3d);padding:6px 4px calc(6px + env(safe-area-inset-bottom,0px));box-shadow:0 -4px 18px rgba(0,0,0,.35)}
+  #proBottomNav[hidden]{display:none}
+  #proBottomNav button{flex:1;min-width:0;min-height:48px;background:none;border:0;color:var(--text-muted,#64748b);font-size:11px;line-height:1.2;font-weight:600;font-family:inherit;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;position:relative;cursor:pointer;border-radius:12px;-webkit-tap-highlight-color:transparent}
+  #proBottomNav button i{font-size:18px}
+  #proBottomNav button.on{color:var(--gold-500,#c9a96e);background:rgba(201,169,110,.12)}
+  #proBottomNav .pbn-b{position:absolute;top:2px;inset-inline-end:calc(50% - 22px);background:#ef4444;color:#fff;border-radius:99px;font-size:10px;min-width:16px;height:16px;line-height:16px;padding:0 4px;text-align:center;font-style:normal}
+  body.has-pbn{padding-bottom:calc(72px + env(safe-area-inset-bottom,0px))}
+}
+</style>
+<nav id="proBottomNav" hidden aria-label="التنقل السريع"></nav>
+<script>
+(function(){
+  var ITEMS=[{"t": "orders", "l": "الطلبات", "i": "fa-solid fa-list-check", "b": "pendingBadge"}, {"t": "products", "l": "المنتجات", "i": "fa-solid fa-boxes-stacked", "b": "lowStockBadge"}, {"t": "add", "l": "إضافة", "i": "fa-solid fa-plus-circle"}, {"t": "accounts", "l": "الحسابات", "i": "fa-solid fa-wallet"}], MORE="المزيد";
+  var nav=document.getElementById('proBottomNav');
+  if(!nav)return;
+  ITEMS.forEach(function(it){
+    var b=document.createElement('button');b.type='button';b.dataset.t=it.t;
+    b.innerHTML='<i class="'+it.i+'"></i><span></span>';b.lastChild.textContent=it.l;
+    if(it.b){var g=document.createElement('em');g.className='pbn-b';g.hidden=true;g.dataset.src=it.b;b.appendChild(g);}
+    b.addEventListener('click',function(){if(typeof window.switchTab==='function'){window.switchTab(it.t);window.scrollTo({top:0,behavior:'smooth'});}});
+    nav.appendChild(b);
+  });
+  var more=document.createElement('button');more.type='button';more.innerHTML='<i class="fa-solid fa-ellipsis"></i><span></span>';more.lastChild.textContent=MORE;
+  more.addEventListener('click',function(){var tc=document.querySelector('.tabs-container');if(tc)tc.scrollIntoView({behavior:'smooth',block:'start'});});
+  nav.appendChild(more);
+  var raf=0;
+  function sync(){
+    raf=0;
+    var tc=document.querySelector('.tabs-container');
+    var visible=!!(tc&&tc.offsetParent!==null);
+    nav.hidden=!visible;document.body.classList.toggle('has-pbn',visible);
+    if(!visible)return;
+    var act=document.querySelector('.tabs-container .tab.active');
+    var cur=act&&(act.dataset.tab||((act.getAttribute('onclick')||'').match(/switchTab\('([^']+)'/)||[])[1]);
+    nav.querySelectorAll('button[data-t]').forEach(function(b){b.classList.toggle('on',b.dataset.t===cur);});
+    nav.querySelectorAll('.pbn-b').forEach(function(g){
+      var s=document.getElementById(g.dataset.src);var n=s?(parseInt(s.textContent,10)||0):0;
+      g.hidden=!(n>0);g.textContent=n>99?'99+':String(n);
+    });
+  }
+  function queue(){if(!raf)raf=requestAnimationFrame(sync);}
+  new MutationObserver(queue).observe(document.body,{subtree:true,attributes:true,attributeFilter:['class','style','hidden'],childList:true,characterData:true});
+  window.addEventListener('resize',queue);queue();
 })();
 </script>
 </body>
